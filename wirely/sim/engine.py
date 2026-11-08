@@ -19,11 +19,14 @@ import time
 
 import numpy as np
 
+from ..i18n import tr
 from ..model.circuit import Circuit
 from . import chips as CH
 from . import devices as D
+from . import extra as EX
 
 D.FACTORY.update(CH.FACTORY)
+D.FACTORY.update(EX.FACTORY)
 
 GSHUNT = 1e-12
 
@@ -156,6 +159,8 @@ class Simulator:
         for d in self.devices:
             d.accept(self.x, self.ctx)
             d.event = None
+        # parts that give out light: the eye averages it (so PWM dims them, as in real life)
+        self.lights = [d for d in self.devices if d.light_now() is not None]
 
     # ========================================================================================== solving
     def _solve_once(self, x0, ctx):
@@ -183,14 +188,14 @@ class Simulator:
             except np.linalg.LinAlgError:
                 xn = np.linalg.lstsq(A, b, rcond=None)[0]
             if not np.all(np.isfinite(xn)):
-                raise ConvergenceError("numbers ran away")
+                raise ConvergenceError(tr("numbers ran away"))
             dx = np.abs(xn - x)
             x = xn
             if not self.nonlinear:
                 return x
             if not ctx.limited and np.all(dx <= self.ABSTOL + self.RELTOL * np.abs(x)):
                 return x
-        raise ConvergenceError("no convergence")
+        raise ConvergenceError(tr("no convergence"))
 
     def dc(self):
         """Steady DC answer with capacitors as open circuits (used by tests and for starting points)."""
@@ -248,7 +253,7 @@ class Simulator:
                 x = self._solve_once(self.x, ctx)
                 dv = float(np.max(np.abs(x[:self.n_nodes] - self.x[:self.n_nodes]))) if self.n_nodes else 0.0
                 if self.reactive and dv > 2 * dv_max and h > 1e-9 and not self._jump:
-                    raise ConvergenceError("too big a change")
+                    raise ConvergenceError(tr("too big a change"))
                 # something switches inside this step: shorten the step to land on the switching moment
                 if self.switchers and tries < 6 and h > 2e-9:
                     fr = [f for f in (d.crossing(self.x, x, self.t, self.t + h) for d in self.switchers)
@@ -263,6 +268,7 @@ class Simulator:
                     self.struggling = True
                     # give up on accuracy for this step rather than freezing
                     x = self.x
+                    dv = 0.0
                     break
                 h *= 0.25
         self.x = x
@@ -278,6 +284,8 @@ class Simulator:
             if getattr(d, "changed", False):
                 d.changed = False
                 switched = True
+        for d in self.lights:
+            d.see(h)
         if self.recording and self.speakers:
             for cid, (a, b) in self.speakers.items():
                 self.spk_record.append((self.t, cid, (float(x[a]) if a >= 0 else 0.0) - (float(x[b]) if b >= 0 else 0.0)))
@@ -287,7 +295,9 @@ class Simulator:
         self._jump = False
         # choose the next step
         if self.reactive or self.ac_freq:
-            if dv < 0.25 * dv_max or was_jump:
+            if dv < 0.05 * dv_max and not was_jump:
+                self.h = min(h * 4.0, self.h_max)      # almost nothing changing (e.g. just after a switch): catch up
+            elif dv < 0.5 * dv_max or was_jump:
                 self.h = min(h * 1.8, self.h_max)
             elif dv > dv_max:
                 self.h = max(h * 0.5, 1e-9)

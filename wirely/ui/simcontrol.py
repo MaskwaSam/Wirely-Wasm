@@ -15,8 +15,9 @@ from ..sim.flow import FlowNetwork
 FRAME_MS = 33
 SPEEDS = [("10× faster", 10.0), ("2× faster", 2.0), ("Real time", 1.0), ("½ speed", 0.5), ("⅕ speed", 0.2),
           ("1/10 speed", 0.1), ("1/100 speed", 0.01), ("1/1000 speed", 0.001)]
-INTERACTIVE = {"switch", "push_make", "push_break", "spdt", "reed_switch", "tilt_switch"}
-TOGGLES = {"switch": "closed", "reed_switch": "magnet", "tilt_switch": "tilted"}
+INTERACTIVE = {"switch", "push_make", "push_break", "spdt", "dpdt", "reed_switch", "tilt_switch", "hall", "rotary",
+               "keypad"}
+TOGGLES = {"switch": "closed", "reed_switch": "magnet", "tilt_switch": "tilted", "hall": "magnet"}
 ADJUSTABLE = {"ldr": "light", "thermistor": "temperature", "var_resistor": "setting", "potentiometer": "setting",
               "moisture": "moisture", "phototransistor": "light"}
 
@@ -44,6 +45,7 @@ class SimController(QObject):
         self.state = "stopped"
         self.sim = None
         self.speed = 1.0
+        D.Device.eye_window = 0.066
         self.behind = False
         self.live = Live()
         self._timer = QTimer(self)
@@ -97,11 +99,17 @@ class SimController(QObject):
         self.stateChanged.emit(self.state)
         self.frame.emit()
 
+    def is_broken(self, cid):
+        """Has this part broken (popped, blown, burnt out)? Used to colour its message, whatever the language."""
+        dev = self.sim.by_id.get(cid) if self.sim is not None else None
+        return bool(getattr(dev, "blown", False))
+
     def active(self):
         return self.state != "stopped"
 
     def set_speed(self, s: float):
         self.speed = s
+        D.Device.eye_window = 0.066 * s      # the eye's 1/15 s, in simulated time at this speed
 
     def set_value(self, cid, key, value):
         """A switch clicked / slider moved / value edited while running."""
@@ -136,22 +144,28 @@ class SimController(QObject):
         for d in sim.devices:
             info = {"blown": d.blown, "warn": d.warn}
             k = d.comp.kind
+            extra = getattr(d, "live_extra", None)
+            if extra is not None:            # parts that report their own look (RGB LEDs, solenoids …)
+                info.update(extra())
             if k in ("led", "lamp"):
-                info["_glow"] = d.glow()
+                info["_glow"] = d.take_glow()
             elif k == "motor":
                 a = self._angle.get(d.cid, 0.0) + 360.0 * 1.5 * d.speed * wall_dt * min(self.speed, 1.0) ** 0.3
                 self._angle[d.cid] = a % 360.0
                 info["angle"] = self._angle[d.cid]
                 info["speed"] = d.speed
                 info["rpm"] = d.rpm
-            elif k == "relay":
+            elif k in ("relay", "relay_dpdt"):
                 info["_on"] = d.on
             elif k == "optocoupler":
-                info["_ir"] = d.glow()
+                info["_ir"] = d.take_glow()
+            elif k == "ssr":
+                info["_ir"] = d.take_glow()
+                info["_on"] = d.drive > 0.5
             elif k == "buzzer":
                 info["level"] = d.level()
             elif k == "sevenseg":
-                info["_segs"] = d.lit()
+                info["_segs"] = d.take_lit()
             elif k == "logic_probe":
                 vv, vl = getattr(d, "vd", 0.0), sim.vlogic
                 info["_level"] = "H" if vv > 0.7 * vl else "L" if vv < 0.3 * vl else "?"
@@ -162,10 +176,15 @@ class SimController(QObject):
                 info["reading"] = fmt(round(val, 9) if abs(val) > 1e-9 else 0.0, unit, 3)
             if len(d.nodes) >= 2 and k not in ("ground",):
                 names = [n for n, _x, _y in d.comp.part.pins]
-                info["v"] = sim.node_voltage(d.nodes[0]) - sim.node_voltage(d.nodes[1])
-                info["i"] = d.i_pins[0]
+                ia, ib = d.main_pins or (0, 1)       # transistors: the channel (C−E, D−S), not the control pin
+                info["v"] = sim.node_voltage(d.nodes[ia]) - sim.node_voltage(d.nodes[ib])
+                info["i"] = d.i_pins[ia]
                 info["pins_v"] = {n: sim.node_voltage(d.nodes[i]) for i, n in enumerate(names[:len(d.nodes)])}
-            info["p"] = d.power
+            power = getattr(d, "power", 0.0)
+            if not power and not d.stores_energy and d.i_pins and len(d.i_pins) == len(d.nodes) and abs(sum(d.i_pins)) < 1e-6:
+                # a part that didn't work its power out, wired fully through its pins: Σ voltage × current in
+                power = sum(sim.node_voltage(n) * i for n, i in zip(d.nodes, d.i_pins))
+            info["p"] = power
             parts[d.cid] = info
         live.parts = parts
         # current flow along the wires

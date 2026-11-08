@@ -11,6 +11,7 @@ import math
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 
+from ..i18n import tr
 from ..model import parts as P
 from ..model.circuit import transform
 
@@ -20,6 +21,25 @@ LED_RGB = {
     "Red": "#ff3b30", "Green": "#2fd158", "Yellow": "#ffd60a", "Blue": "#2f7bff",
     "White": "#f4f6ff", "Orange": "#ff9f0a",
 }
+
+
+# Symbol style: "uk" (British / IEC: box resistors) or "us" (American / ANSI: zigzag resistors). Only the look
+# changes — same pins, same sizes, same circuits.
+STYLE = "uk"
+
+
+def set_style(style):
+    global STYLE
+    STYLE = "us" if style == "us" else "uk"
+
+
+def _zigzag(c, x0, x1, amp=6.0, peaks=6, w=LW):
+    """A zigzag from (x0, 0) to (x1, 0): the American resistor."""
+    step = (x1 - x0) / peaks
+    pts = [(x0, 0.0)]
+    pts += [(x0 + step * (k + 0.5), -amp if k % 2 == 0 else amp) for k in range(peaks)]
+    pts.append((x1, 0.0))
+    c.poly(pts, None, w, closed=False)
 
 
 class Ctx:
@@ -99,9 +119,16 @@ class Ctx:
             QPointF(0, 1) if align & Qt.AlignTop else QPointF(0, -1)
         # direction in the part's own frame -> direction on screen
         ins = _rotvec(ins, self.rot, self.flip)
+        side_pin = bool(align & (Qt.AlignLeft | Qt.AlignRight))
         if abs(ins.x()) > abs(ins.y()):
             r = QRectF(0, -size, w, 2 * size) if ins.x() > 0 else QRectF(-w, -size, w, 2 * size)
             a = (Qt.AlignLeft if ins.x() > 0 else Qt.AlignRight) | Qt.AlignVCenter
+        elif side_pin:
+            # a chip turned on its side: its side pins (only 10 apart) are now along the top or bottom, so
+            # their names run along the pins (reading upwards) instead of crashing into each other
+            p.rotate(-90)
+            r = QRectF(0, -size, w, 2 * size) if ins.y() < 0 else QRectF(-w, -size, w, 2 * size)
+            a = (Qt.AlignLeft if ins.y() < 0 else Qt.AlignRight) | Qt.AlignVCenter
         else:
             r = QRectF(-w / 2, 0, w, size + 2) if ins.y() > 0 else QRectF(-w / 2, -size - 2, w, size + 2)
             a = Qt.AlignHCenter | (Qt.AlignTop if ins.y() > 0 else Qt.AlignBottom)
@@ -213,7 +240,10 @@ def _ground(c):
 # ------------------------------------------------------------------------------------------ resistors
 def _resistor(c):
     _leads(c)
-    c.rect(-20, -7, 40, 14, c.paper)
+    if STYLE == "us":
+        _zigzag(c, -20, 20)
+    else:
+        c.rect(-20, -7, 40, 14, c.paper)
 
 
 def _var_resistor(c):
@@ -227,6 +257,17 @@ def _potentiometer(c):
 
 
 def _fuse(c):
+    if STYLE == "us":                   # an S-shaped wire
+        c.line(-30, 0, -14, 0)
+        c.line(14, 0, 30, 0)
+        path = QPainterPath()
+        path.moveTo(-14, 0)
+        path.cubicTo(-7, -14, 0, -7, 0, 0)
+        path.cubicTo(0, 7, 7, 14, 14, 0)
+        c.p.setPen(c.pen())
+        c.p.setBrush(Qt.NoBrush)
+        c.p.drawPath(path)
+        return
     c.rect(-18, -5, 36, 10, c.paper)
     c.line(-30, 0, 30, 0)
 
@@ -240,6 +281,18 @@ def _capacitor(c):
 
 
 def _electrolytic(c):
+    if STYLE == "us":                   # straight + plate, curved − plate
+        c.line(-20, 0, -4, 0)
+        c.line(5, 0, 20, 0)
+        c.line(-4, -12, -4, 12, 2.6)
+        path = QPainterPath()
+        path.moveTo(8, -12)
+        path.quadTo(2, 0, 8, 12)
+        c.p.setPen(c.pen(2.6))
+        c.p.setBrush(Qt.NoBrush)
+        c.p.drawPath(path)
+        _plus(c, -12, -11, 3)
+        return
     c.line(-20, 0, -8, 0)
     c.line(8, 0, 20, 0)
     c.rect(-8, -12, 4, 24, c.paper, 1.6)
@@ -300,7 +353,10 @@ def _ldr(c):
     c.line(-30, 0, -12, 0)
     c.line(12, 0, 30, 0)
     c.circle(0, 0, 17, None, 1.6)
-    c.rect(-12, -5, 24, 10, c.paper)
+    if STYLE == "us":
+        _zigzag(c, -12, 12, 5, 4)
+    else:
+        c.rect(-12, -5, 24, 10, c.paper)
     c.arrow(-21, -24, -9, -12, 5, 1.5)
     c.arrow(-9, -27, 3, -15, 5, 1.5)
 
@@ -327,12 +383,18 @@ def _diode(c):
     _diode_body(c, c.ink)
 
 
+def led_fill(col, glow):
+    """An LED's body colour: pale when off; when lit, its full, strong colour (the glow around it shows how
+    bright it is)."""
+    fill = QColor(col)
+    fill.setAlphaF(0.22 if glow <= 0.02 else min(1.0, 0.7 + 0.5 * glow))
+    return fill
+
+
 def _led(c):
     col = QColor(LED_RGB.get(c.props.get("colour", "Red"), "#ff3b30"))
     glow = c.props.get("_glow", 0.0)            # set by the simulator from r2 on
-    fill = QColor(col)
-    fill.setAlphaF(0.35 + 0.65 * glow)
-    _diode_body(c, fill)
+    _diode_body(c, led_fill(col, glow))
     c.arrow(-1, -13, 7, -23, 4.5, 1.5)
     c.arrow(6, -10, 14, -20, 4.5, 1.5)
 
@@ -372,6 +434,18 @@ def _lamp(c):
     fill = QColor(255, 214, 10)
     fill.setAlphaF(0.85 * glow)
     c.circle(0, 0, 13, fill if glow > 0 else c.paper)
+    if STYLE == "us":                   # a looped filament between the two leads
+        c.line(-13, 0, -6, 0, 1.8)
+        c.line(6, 0, 13, 0, 1.8)
+        path = QPainterPath()
+        path.moveTo(-6, 0)
+        path.cubicTo(-6, -10, 2, -10, 2, -5)
+        path.cubicTo(2, -1, -2, -1, -2, -5)
+        path.cubicTo(-2, -10, 6, -10, 6, 0)
+        c.p.setPen(c.pen(1.8))
+        c.p.setBrush(Qt.NoBrush)
+        c.p.drawPath(path)
+        return
     d = 13 / math.sqrt(2)
     c.line(-d, -d, d, d, 1.8)
     c.line(-d, d, d, -d, 1.8)
@@ -483,7 +557,7 @@ def _mosfet(c, n=True):
 def _gate_body(c, kind):
     p = c.p
     path = QPainterPath()
-    if kind in ("and", "nand"):
+    if kind in ("and", "nand", "schmitt_nand"):
         path.moveTo(-25, -20)
         path.lineTo(0, -20)
         path.arcTo(QRectF(-20, -20, 40, 40), 90, -180)
@@ -515,7 +589,7 @@ def _gate_body(c, kind):
         p.setBrush(Qt.NoBrush)
         p.drawPath(back)
         ins = -26
-    bubble = kind in ("nand", "nor", "not", "schmitt_not")
+    bubble = kind in ("nand", "nor", "not", "schmitt_not", "schmitt_nand")
     if bubble:
         c.circle(tip + 3.5, 0, 3.5, c.paper, 1.8)
         c.line(tip + 7, 0, 40, 0)
@@ -526,21 +600,22 @@ def _gate_body(c, kind):
     else:
         c.line(-40, -10, ins, -10)
         c.line(-40, 10, ins, 10)
-    if kind == "schmitt_not":
+    if kind in ("schmitt_not", "schmitt_nand"):
+        dx = -2 if kind == "schmitt_nand" else 0
         hp = QPainterPath()
-        hp.moveTo(-14, 4)
-        hp.lineTo(-5, 4)
-        hp.lineTo(-7, -4)
-        hp.lineTo(2, -4)
-        hp.moveTo(-12, 4)
-        hp.lineTo(-10, -4)
-        hp.lineTo(-5, -4)
+        hp.moveTo(-14 + dx, 4)
+        hp.lineTo(-5 + dx, 4)
+        hp.lineTo(-7 + dx, -4)
+        hp.lineTo(2 + dx, -4)
+        hp.moveTo(-12 + dx, 4)
+        hp.lineTo(-10 + dx, -4)
+        hp.lineTo(-5 + dx, -4)
         p.setPen(c.pen(1.2))
         p.setBrush(Qt.NoBrush)
         p.drawPath(hp)
 
 
-def _box_ic(c, x0, y0, x1, y1, title, labels=None, numbers=None, clock=None):
+def _box_ic(c, x0, y0, x1, y1, title, labels=None, numbers=None, clock=None, title_y=None):
     """A chip drawn as a box with labelled pins (leads from each pin to the box edge)."""
     part = P.get(c.kind)
     for name, px, py in part.pins:
@@ -569,7 +644,24 @@ def _box_ic(c, x0, y0, x1, y1, title, labels=None, numbers=None, clock=None):
     if clock:
         cx, cy = x0, clock
         c.poly([(cx, cy - 4), (cx + 6, cy), (cx, cy + 4)], None, 1.2, closed=False)
-    c.upright((x0 + x1) / 2, (y0 + y1) / 2 + (8 if c.kind == "timer555" else 0), title, 11)
+    ty = title_y if title_y is not None else (y0 + y1) / 2 + (8 if c.kind == "timer555" else 0)
+    if title_y is not None and c.rot % 2 == 1:
+        # a narrow box (a regulator) turned on its side: the title runs along it
+        p = c.p
+        p.save()
+        p.translate((x0 + x1) / 2, ty)
+        if c.flip:
+            p.scale(-1, 1)
+        p.rotate(-90 * c.rot - 90)
+        f = QFont()
+        f.setPixelSize(11)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(c.ink)
+        p.drawText(QRectF(-40, -11, 80, 22), Qt.AlignCenter, title)
+        p.restore()
+        return
+    c.upright((x0 + x1) / 2, ty, title, 11)
 
 
 def _timer555(c):
@@ -710,6 +802,28 @@ def _relay(c):
     c.upright(37, -22, "NO", 6.5, False)
 
 
+def _relay_dpdt(c):
+    # coil
+    c.line(-40, -30, -40, -15)
+    c.line(-40, 15, -40, 30)
+    c.rect(-48, -15, 16, 30, c.paper)
+    c.line(-48, 15, -32, -15, 1.4)
+    on = bool(c.props.get("_on"))
+    for oy in (-20, 20):
+        c.line(0, oy, 12, oy)
+        c.line(28, oy - 10, 40, oy - 10)
+        c.line(28, oy + 10, 40, oy + 10)
+        c.line(14, oy, 27, oy + (8 if on else -8))
+        for x, y in ((12, oy), (28, oy - 10), (28, oy + 10)):
+            c.circle(x, y, 2.2, c.paper, 1.4)
+        c.upright(36, oy - 15, "NC", 6, False)
+        c.upright(36, oy + 5, "NO", 6, False)
+    c.p.setPen(c.pen(1.2, style=Qt.DashLine))
+    yb = 4 if on else -4
+    c.p.drawLine(QPointF(-32, 0), QPointF(20, 0))
+    c.p.drawLine(QPointF(20, -20 + yb), QPointF(20, 20 + yb))
+
+
 def _reed_switch(c):
     c.line(-30, 0, -14, 0)
     c.line(14, 0, 30, 0)
@@ -811,8 +925,368 @@ def _optocoupler(c):
     c.arrow(12 + 14 * 0.35, 5 + 9 * 0.35, 24.5, 13, 5.5, 0.1)
 
 
+def _shunt_ref(c):
+    """TL431: like a Zener (cathode at the top, anode at the bottom) with the REF lead touching the triangle."""
+    c.line(0, -30, 0, -9)
+    c.line(0, 10, 0, 30)
+    c.poly([(-10, 10), (10, 10), (0, -9)], c.paper)
+    c.poly([(-13, -5), (-10, -9), (10, -9), (13, -13)], None, 2.2, closed=False)
+    c.line(-30, 0, -5, 0)
+    c.label_at(4, -24, "K", Qt.AlignLeft | Qt.AlignVCenter, 6.5)
+    c.label_at(4, 24, "A", Qt.AlignLeft | Qt.AlignVCenter, 6.5)
+    c.label_at(-27, -6, "REF", Qt.AlignLeft | Qt.AlignVCenter, 6)
+
+
+def _ssr(c):
+    """Solid-state relay: the optoisolator's LED on the left, a switch (two MOSFETs) on the right."""
+    c.rect(-30, -32, 60, 64, None, 1.2)
+    c.line(-40, -20, -18, -20)
+    c.line(-18, -20, -18, -8)
+    c.poly([(-27, -8), (-9, -8), (-18, 6)], c.paper)
+    c.line(-27, 6, -9, 6, 2.2)
+    c.line(-18, 6, -18, 20)
+    c.line(-18, 20, -40, 20)
+    ir = c.props.get("_ir", 0.0)
+    on = c.props.get("_on", False)
+    if ir > 0.02:
+        old = c.ink
+        c.ink = QColor(255, 170, 30)
+        c.arrow(-6, -5, 4, -5, 4.5, 1.6)
+        c.arrow(-6, 3, 4, 3, 4.5, 1.6)
+        c.ink = old
+    else:
+        c.arrow(-6, -5, 4, -5, 4.5, 1.5)
+        c.arrow(-6, 3, 4, 3, 4.5, 1.5)
+    # output switch: O1 at the top right, O2 at the bottom right
+    c.line(40, -20, 20, -20)
+    c.line(20, -20, 20, -10)
+    c.line(40, 20, 20, 20)
+    c.line(20, 20, 20, 10)
+    if on:
+        c.line(20, 10, 20, -10, 2.0)
+    else:
+        c.line(20, 10, 12, -8, 2.0)
+    c.circle(20, -10, 1.8, c.ink, 1)
+    c.circle(20, 10, 1.8, c.ink, 1)
+
+
+OVERBAR = "\u0305"
+
+
+def _lo(name):
+    """Pin label with a bar over it (active-low)."""
+    return "".join(ch + OVERBAR for ch in name)
+
+
+def _mux4051(c):
+    _box_ic(c, -40, -50, 40, 40, "4051", labels={"INH": "INH"})
+
+
+def _sr164(c):
+    _box_ic(c, -40, -50, 40, 40, "164", labels={"MR": _lo("MR"), "CP": "CP"}, clock=10)
+
+
+def _sr595(c):
+    _box_ic(c, -40, -50, 40, 50, "595", labels={"MR": _lo("MR"), "OE": _lo("OE")}, clock=-20)
+
+
+def _sr165(c):
+    _box_ic(c, -40, -70, 40, 60, "165", labels={"CE": _lo("CE"), "PL": _lo("PL"), "Q7N": _lo("Q7")}, clock=30)
+
+
+def _sr597(c):
+    _box_ic(c, -40, -70, 40, 70, "597", labels={"PL": _lo("PL"), "MR": _lo("MR")}, clock=30)
+
+
+# ------------------------------------------------------------------------------------------ 1.4.0 parts
+LED_MIX_RGB = {"Red": "#ff3b30", "Green": "#2fd158", "Blue": "#2f7bff"}
+
+
+def _mini_diode(c, x0, x1, y, fill, w=8):
+    """A small diode pointing from x0 to x1 (either way) at height y, with a filled body."""
+    c.poly([(x0, y - w), (x0, y + w), (x1, y)], fill)
+    c.line(x1, y - w, x1, y + w, 2.0)
+
+
+def _lit(c, colour, k):
+    return led_fill(QColor(LED_MIX_RGB[colour]), k)
+
+
+def _led_bi2(c):
+    g = list(c.props.get("_glows") or [0.0, 0.0])
+    c.line(-30, 0, -14, 0)
+    c.line(14, 0, 30, 0)
+    c.line(-14, -9, -14, 9)
+    c.line(14, -9, 14, 9)
+    for y, xa, xb, col, k in ((-9, -6, 6, "Red", g[0]), (9, 6, -6, "Green", g[1])):
+        c.line(-14, y, min(xa, xb), y)
+        c.line(max(xa, xb), y, 14, y)
+        _mini_diode(c, xa, xb, y, _lit(c, col, k), 6)
+    c.arrow(0, -18, 7, -26, 4, 1.4)
+    c.arrow(7, -16, 14, -24, 4, 1.4)
+
+
+def _led_multi(c, colours):
+    g = list(c.props.get("_glows") or [0.0] * len(colours))
+    ys = [-20, 0, 20] if len(colours) == 3 else [-10, 10]
+    for (col, y, k) in zip(colours, ys, g):
+        c.line(-30, y, -8, y)
+        _mini_diode(c, -8, 6, y, _lit(c, col, k), 7)
+        c.line(6, y, 14, y)
+        c.upright(-22, y - 6, col[0], 7, False)
+    c.line(14, ys[0], 14, ys[-1])
+    c.line(14, 0, 30, 0)
+    top = ys[0]
+    c.arrow(-2, top - 10, 5, top - 18, 4, 1.4)
+    c.arrow(5, top - 8, 12, top - 16, 4, 1.4)
+
+
+def _bridge(c):
+    """Bridge rectifier: four diodes round a diamond, all pointing towards +."""
+    c.line(0, -40, 0, -30)
+    c.line(0, 30, 0, 40)
+    c.line(30, 0, 40, 0)
+    c.line(-40, 0, -30, 0)
+    p = c.p
+    for (xa, ya), (xb, yb) in (((-30, 0), (0, -30)), ((0, -30), (30, 0)), ((-30, 0), (0, 30)), ((0, 30), (30, 0))):
+        c.line(xa, ya, xb, yb, 1.8)
+        mx, my = (xa + xb) / 2, (ya + yb) / 2
+        ang = math.degrees(math.atan2(yb - ya, xb - xa))
+        p.save()
+        p.translate(mx, my)
+        p.rotate(ang)
+        c.poly([(-5, -5), (-5, 5), (4, 0)], c.ink, 1.2)
+        c.line(4, -5, 4, 5, 1.8)
+        p.restore()
+    c.upright(9, -32, "~", 10, False)
+    c.upright(9, 32, "~", 10, False)
+    c.upright(34, -8, "+", 9, True)
+    c.upright(-34, -8, "−", 9, True)
+
+
+def _scr(c):
+    _diode_body(c, c.ink)
+    c.line(9, 6, 10, 16)
+    c.line(10, 16, 10, 30)
+    if c.props.get("_on"):
+        p = c.p
+        p.setPen(Qt.NoPen)
+        lit = QColor(theme_accent())
+        lit.setAlphaF(0.35)
+        p.setBrush(lit)
+        p.drawRoundedRect(QRectF(-14, -14, 28, 28), 6, 6)
+
+
+def theme_accent():
+    from . import theme
+    return theme.ACCENT
+
+
+def _reg_fixed(c):
+    model = str(c.props.get("model", "7805")).replace("LM", "")
+    _box_ic(c, -40, -20, 40, 20, model, labels={"IN": "IN", "OUT": "OUT", "GND": "GND"}, title_y=-9)
+
+
+def _reg_adj(c):
+    _box_ic(c, -40, -20, 40, 20, "LM317", labels={"IN": "IN", "OUT": "OUT", "ADJ": "ADJ"}, title_y=-9)
+
+
+def _coil_v(c, x, y0, y1, bulge):
+    """A coil drawn down the page from y0 to y1, its loops bulging left (-1) or right (+1)."""
+    path = QPainterPath()
+    path.moveTo(x, y0)
+    n = 4
+    hgt = (y1 - y0) / n
+    for k in range(n):
+        yy = y0 + hgt * k
+        if bulge < 0:
+            path.arcTo(QRectF(x - hgt / 2, yy, hgt, hgt), 90, 180)
+        else:
+            path.arcTo(QRectF(x - hgt / 2, yy, hgt, hgt), 90, -180)
+    c.p.setPen(c.pen())
+    c.p.setBrush(Qt.NoBrush)
+    c.p.drawPath(path)
+
+
+def _transformer(c):
+    c.line(-40, -30, -12, -30)
+    c.line(-12, -30, -12, -24)
+    c.line(-40, 30, -12, 30)
+    c.line(-12, 30, -12, 24)
+    c.line(40, -30, 12, -30)
+    c.line(12, -30, 12, -24)
+    c.line(40, 30, 12, 30)
+    c.line(12, 30, 12, 24)
+    _coil_v(c, -12, -24, 24, 1)
+    _coil_v(c, 12, -24, 24, -1)
+    c.line(-2, -26, -2, 26, 1.6)
+    c.line(2, -26, 2, 26, 1.6)
+
+
+def _dpdt(c):
+    a = c.props.get("position", "A") == "A"
+    for oy in (-20, 20):
+        c.line(-30, oy, -14, oy)
+        c.line(14, oy - 10, 30, oy - 10)
+        c.line(14, oy + 10, 30, oy + 10)
+        c.line(-12, oy, 12, oy + (-8 if a else 8))
+        _contact(c, -14, oy)
+        _contact(c, 14, oy - 10)
+        _contact(c, 14, oy + 10)
+    c.p.setPen(c.pen(1.2, style=Qt.DashLine))
+    c.p.drawLine(QPointF(0, -20 + (-4 if a else 4)), QPointF(0, 20 + (-4 if a else 4)))
+    c.upright(22, -37, "A", 8, False)
+    c.upright(22, -3, "B", 8, False)
+
+
+def _hall(c):
+    c.line(0, -30, 0, -18)
+    c.line(0, 18, 0, 30)
+    c.line(18, 0, 30, 0)
+    c.rect(-18, -18, 36, 36, c.paper)
+    c.upright(0, 1, "H", 13)
+    c.upright(-8, -25, "+V", 6.5, False)
+    c.upright(-8, 25, "0V", 6.5, False)
+    c.upright(25, -6, "OUT", 6, False)
+    if c.props.get("magnet"):         # the magnet, drawn beside it
+        p = c.p
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#e03131"))
+        p.drawRect(QRectF(-30, -10, 7, 10))
+        p.setBrush(QColor("#1971c2"))
+        p.drawRect(QRectF(-30, 0, 7, 10))
+
+
+def _solenoid(c):
+    c.line(-30, 0, -18, 0)
+    c.line(18, 0, 30, 0)
+    path = QPainterPath()
+    path.moveTo(-18, 0)
+    for k in range(4):
+        path.arcTo(QRectF(-18 + 9 * k, -5, 9, 10), 180, -180)
+    c.p.setPen(c.pen())
+    c.p.setBrush(Qt.NoBrush)
+    c.p.drawPath(path)
+    x = -14 if c.props.get("_on") else -4         # the plunger: pulled in while energised
+    c.rect(x, 8, 28, 5, c.ink, 1.0)
+    c.line(x + 28, 10.5, x + 34, 10.5, 1.6)
+
+
+def _comparator(c):
+    c.line(-40, -10, -30, -10)
+    c.line(-40, 10, -30, 10)
+    c.line(30, 0, 40, 0)
+    c.poly([(-30, -30), (-30, 30), (30, 0)], c.paper)
+    c.line(-25, -10, -19, -10, 1.5)              # + at the top
+    c.line(-22, -13, -22, -7, 1.5)
+    c.line(-25, 10, -19, 10, 1.5)                # − at the bottom
+    # open-collector output mark
+    c.line(4, -4, 12, -4, 1.2)
+    c.line(8, -4, 8, 4, 1.2)
+    c.line(5, 4, 11, 4, 1.2)
+
+
+def _ic4026(c):
+    _box_ic(c, -40, -40, 40, 60, "4026", labels={"CLK": ""}, clock=-30)
+
+
+def _l293d(c):
+    _box_ic(c, -40, -60, 40, 50, "L293D", labels={"EN12": "EN1,2", "EN34": "EN3,4"})
+
+
+def _ic4060(c):
+    _box_ic(c, -40, -60, 40, 50, "4060", labels={"PI": "RS", "PO": "RTC", "POn": "CTC"})
+
+
+def _jkff(c):
+    _box_ic(c, -30, -40, 30, 40, "", labels={"CLK": "", "Qn": "Q̅"}, clock=0)
+
+
+def _xtal_clock(c):
+    c.rect(-30, -18, 60, 36, c.paper)
+    c.line(30, 0, 40, 0)
+    # a crystal: two plates with the quartz between them
+    c.line(-22, -8, -22, 8, 1.6)
+    c.line(-8, -8, -8, 8, 1.6)
+    c.rect(-19, -6, 8, 12, None, 1.4)
+    # and the square wave it makes
+    c.poly([(0, 6), (5, 6), (5, -6), (12, -6), (12, 6), (19, 6), (19, -6), (24, -6)], None, 1.4, closed=False)
+
+
+def _stepper(c):
+    for y, x0, x1 in ((-10, -40, -16), (10, -40, -16), (-10, 16, 40), (10, 16, 40)):
+        c.line(x0, y, x1, y)
+    c.circle(0, 0, 19, c.paper, 1.8)
+    # step marks round the inside, and the shaft's pointer showing where it is
+    for k in range(8):
+        a = math.radians(k * 45)
+        c.line(15 * math.cos(a), 15 * math.sin(a), 17.5 * math.cos(a), 17.5 * math.sin(a), 1.0)
+    ang = math.radians(float(c.props.get("_angle", 0.0)) - 90)
+    c.line(0, 0, 12 * math.cos(ang), 12 * math.sin(ang), 2.2)
+    c.circle(0, 0, 2.5, c.ink, 1.0)
+    c.upright(-30, -16, "A", 7, False)
+    c.upright(30, -16, "B", 7, False)
+
+
+def _rotary(c):
+    c.line(-30, 0, -16, 0)
+    pos = str(c.props.get("position", "1"))
+    for k, y in enumerate((-30, -10, 10, 30)):
+        c.line(14, y, 30, y)
+        _contact(c, 12, y)
+        c.upright(22, y - 6, str(k + 1), 6.5, False)
+    _contact(c, -14, 0)
+    sel = int(pos) - 1 if pos in ("1", "2", "3", "4") else 0
+    y = (-30, -10, 10, 30)[sel]
+    c.line(-12, 0, 10, y * 0.92, 1.8)
+    # the knob's arc
+    p = c.p
+    p.setPen(c.pen(1.0, style=Qt.DashLine))
+    p.setBrush(Qt.NoBrush)
+    p.drawArc(QRectF(-20, -32, 64, 64), 120 * 16, 120 * 16)
+
+
+KEYPAD_KEYS = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#")
+
+
+def keypad_key_at(x, y):
+    """Which key is at (x, y) in the keypad's own frame, or None."""
+    for n, k in enumerate(KEYPAD_KEYS):
+        cx, cy = -20 + 20 * (n % 3), -38 + 20 * (n // 3)
+        if abs(x - cx) <= 9 and abs(y - cy) <= 8:
+            return k
+    return None
+
+
+def _keypad(c):
+    c.rect(-40, -55, 80, 110, c.paper)
+    pressed = str(c.props.get("_key") or "")
+    for n, k in enumerate(KEYPAD_KEYS):
+        cx, cy = -20 + 20 * (n % 3), -38 + 20 * (n // 3)
+        down = k == pressed
+        p = c.p
+        p.setPen(c.pen(1.2))
+        p.setBrush(QColor(theme_accent()) if down else c.paper)
+        p.drawRoundedRect(QRectF(cx - 8, cy - 7, 16, 14), 3, 3)
+        c.upright(cx, cy, k, 8, True, QColor("#ffffff") if down else None)
+    for name, px, py in P.get("keypad").pins:
+        c.line(px, 55, px, py)
+        c.upright(px, 50, name, 5, False)
+
+
+DRAW.update({
+    "led_bi2": _led_bi2, "led_bi3": lambda c: _led_multi(c, ("Red", "Green")),
+    "led_rgb": lambda c: _led_multi(c, ("Red", "Green", "Blue")), "bridge": _bridge, "scr": _scr,
+    "reg_fixed": _reg_fixed, "reg_adj": _reg_adj, "transformer": _transformer, "dpdt": _dpdt, "hall": _hall,
+    "solenoid": _solenoid, "comparator": _comparator, "ic4026": _ic4026, "ic4060": _ic4060,
+    "jkff": _jkff, "xtal_clock": _xtal_clock, "stepper": _stepper, "rotary": _rotary, "keypad": _keypad,
+    "schmitt_nand": lambda c: _gate_body(c, "schmitt_nand"), "l293d": _l293d,
+})
+
+
 def note_lines(props):
-    return (str(props.get("text", "")) or " ").split("\n")
+    # the notes that come with the examples are shown in the chosen language; anything a person typed is left alone
+    return tr(str(props.get("text", ""))).split("\n") if props.get("text") else [" "]
 
 
 def _note(c):
@@ -826,8 +1300,10 @@ def _note(c):
 
 
 DRAW.update({
-    "inductor": _inductor, "relay": _relay, "reed_switch": _reed_switch, "tilt_switch": _tilt_switch,
+    "inductor": _inductor, "relay": _relay, "relay_dpdt": _relay_dpdt, "reed_switch": _reed_switch, "tilt_switch": _tilt_switch,
     "moisture": _moisture, "phototransistor": _phototransistor, "optocoupler": _optocoupler, "note": _note,
+    "shunt_ref": _shunt_ref, "ssr": _ssr, "mux4051": _mux4051, "sr164": _sr164, "sr595": _sr595,
+    "sr165": _sr165, "sr597": _sr597,
 })
 
 

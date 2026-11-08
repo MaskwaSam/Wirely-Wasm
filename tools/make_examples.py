@@ -472,12 +472,493 @@ def optoisolator():
     return c
 
 
-def main():
+def tl431_reference():
+    c = Circuit()
+    c.title = "TL431 adjustable reference"
+    b = c.add("dc_supply", 0, 150, rot=1, props={"voltage": 12})           # + (0,120) - (0,180)
+    rs = c.add("resistor", 110, 0, props={"resistance": 470})              # (80,0)-(140,0)
+    u = c.add("shunt_ref", 220, 150, props={"model": "TL431"})             # K (220,120) A (220,180) REF (190,150)
+    r1 = c.add("resistor", 140, 90, rot=1, props={"resistance": 10e3})     # (140,60)-(140,120)
+    r2 = c.add("resistor", 140, 210, rot=1, props={"resistance": 10e3})    # (140,180)-(140,240)
+    vm = c.add("voltmeter", 330, 150, rot=1)                               # + (330,120) - (330,180)
+    assert pin(c, u, "REF") == (190, 150) and pin(c, r1, "1") == (140, 60)
+    wire(c, pin(c, b, "+"), (0, 0), pin(c, rs, "1"))
+    wire(c, pin(c, rs, "2"), (220, 0), pin(c, u, "K"))
+    wire(c, (140, 0), pin(c, r1, "1"))
+    wire(c, pin(c, r1, "2"), (140, 150), pin(c, u, "REF"))
+    wire(c, (140, 150), pin(c, r2, "1"))
+    wire(c, (220, 0), (330, 0), pin(c, vm, "+"))
+    wire(c, pin(c, b, "-"), (0, 300), (330, 300), pin(c, vm, "-"))
+    wire(c, pin(c, u, "A"), (220, 300))
+    wire(c, pin(c, r2, "2"), (140, 300))
+    c.add("ground", 0, 300)
+    c.add("note", 170, -60, props={"text": "The TL431 sinks just enough current to hold REF at 2.495 V,\n"
+                                           "so Vout = 2.495 × (1 + R1 / R2) = 5 V here. Change R1 or R2!"})
+    return c
+
+
+def shift_register_595():
+    c = Circuit()
+    c.title = "Shift register (74HC595)"
+    b = c.add("dc_supply", 0, 150, rot=1, props={"voltage": 5})            # + (0,120) - (0,180)
+    u = c.add("sr595", 300, 150)        # DS (240,110) SHCP (240,130) STCP (240,150) MR (240,170) OE (240,190)
+    assert pin(c, u, "DS") == (240, 110) and pin(c, u, "Q0") == (360, 110) and pin(c, u, "Q7S") == (360, 190)
+    s_data = c.add("switch", 210, 80, rot=1)                               # (210,50)-(210,110)
+    s_clk = c.add("push_make", 170, 80, rot=1)                             # (170,50)-(170,110)
+    s_lat = c.add("push_make", 130, 80, rot=1)                             # (130,50)-(130,110)
+    for sw in (s_data, s_clk, s_lat):
+        wire(c, pin(c, sw, "1"), (sw.x, 40))
+    wire(c, pin(c, b, "+"), (0, 40), (210, 40))
+    wire(c, pin(c, s_data, "2"), pin(c, u, "DS"))
+    wire(c, pin(c, s_clk, "2"), (170, 130), pin(c, u, "SHCP"))
+    wire(c, pin(c, s_lat, "2"), (130, 150), pin(c, u, "STCP"))
+    wire(c, pin(c, u, "MR"), (110, 170), (110, 40))          # MR to + (not clearing)
+    wire(c, pin(c, u, "OE"), (230, 190), (230, 400))         # OE to 0 V (outputs on)
+    xmax = 420 + 70 * 7
+    wire(c, pin(c, b, "-"), (0, 400), (xmax, 400))
+    for i in range(8):
+        x = 420 + 70 * (7 - i)              # Q7 on the left … Q0 on the right: read it as a binary number
+        led = c.add("led", x, 260, rot=1, props={"colour": "Red"})        # A (x,230) K (x,290)
+        r = c.add("resistor", x, 330, rot=1, props={"resistance": 330})   # (x,300)-(x,360)
+        wire(c, pin(c, u, f"Q{i}"), (x, 110 + 10 * i), pin(c, led, "A"))
+        wire(c, pin(c, led, "K"), pin(c, r, "1"))
+        wire(c, pin(c, r, "2"), (x, 400))
+    c.add("logic_probe", 380, 260)
+    wire(c, pin(c, u, "Q7S"), (380, 190), (380, 260))
+    c.add("ground", 0, 400)
+    c.add("note", 660, 30, props={"text": "Set DATA (S1), press CLOCK (S2) to shift it in — eight times.\n"
+                                           "Then press LATCH (S3): the LEDs show the byte all at once."})
+    s_data.ref, s_clk.ref, s_lat.ref = "S1", "S2", "S3"
+    return c
+
+
+# ------------------------------------------------------------------------------------------- 1.4.0 examples
+def thyristor_alarm():
+    """A latching alarm: press the trigger and it keeps sounding until you press reset."""
+    c = Circuit()
+    c.title = "Thyristor alarm (latching)"
+    b = c.add("battery", 0, 150, rot=1, props={"voltage": 9})                 # + (0,120) - (0,180)
+    reset = c.add("push_break", 100, 0)                                       # (70,0)-(130,0)
+    bz = c.add("buzzer", 400, 80, rot=1, props={"voltage": 9})                # + (400,50) - (400,110)
+    scr = c.add("scr", 400, 170, rot=1, props={"model": "C106D"})             # A (400,140) K (400,200) G (370,180)
+    trig = c.add("push_make", 200, 90, rot=1)                                 # (200,60)-(200,120)
+    rg = c.add("resistor", 285, 180, props={"resistance": 4700})              # (255,180)-(315,180)
+    assert pin(c, scr, "G") == (370, 180) and pin(c, bz, "+") == (400, 50)
+    wire(c, pin(c, b, "+"), (0, 0), pin(c, reset, "1"))
+    wire(c, pin(c, reset, "2"), (400, 0), pin(c, bz, "+"))
+    wire(c, pin(c, bz, "-"), pin(c, scr, "A"))
+    wire(c, pin(c, trig, "1"), (200, 0))
+    wire(c, pin(c, trig, "2"), (200, 180), pin(c, rg, "1"))
+    wire(c, pin(c, rg, "2"), pin(c, scr, "G"))
+    wire(c, pin(c, scr, "K"), (400, 300))
+    wire(c, pin(c, b, "-"), (0, 300), (400, 300))
+    c.add("ground", 0, 300)
+    reset.ref, trig.ref = "S1", "S2"
+    c.add("note", 230, -60, props={"text": "Press S2 (the trigger, like a door switch): the alarm keeps sounding\n"
+                                            "after you let go — the thyristor latches. Press S1 to reset it."})
+    return c
+
+
+def power_supply_5v():
+    """Mains to 5 V: transformer, bridge rectifier, smoothing capacitor and a 7805 regulator."""
+    c = Circuit()
+    c.title = "5 V power supply (7805)"
+    ac = c.add("ac_supply", 0, 150, rot=1, props={"voltage": 325, "frequency": 50})   # 1 (0,120) 2 (0,180)
+    t = c.add("transformer", 120, 150, props={"ratio": 20, "rating": 5})              # P1 (80,120) P2 (80,180) S1 (160,120) S2 (160,180)
+    br = c.add("bridge", 260, 160)                                                     # AC1 (260,120) AC2 (260,200) + (300,160) - (220,160)
+    c1 = c.add("electrolytic", 340, 230, rot=1, props={"capacitance": 1000e-6, "max_voltage": 25})  # + (340,210) - (340,250)
+    reg = c.add("reg_fixed", 450, 160, props={"model": "7805"})                       # IN (400,160) GND (450,190) OUT (500,160)
+    r = c.add("resistor", 570, 160, props={"resistance": 220})                        # (540,160)-(600,160)
+    led = c.add("led", 640, 230, rot=1, props={"colour": "Green"})                    # A (640,200) K (640,260)
+    vm = c.add("voltmeter", 720, 230, rot=1)                                           # + (720,200) - (720,260)
+    assert pin(c, ac, "1") == (0, 120) and pin(c, t, "S2") == (160, 180) and pin(c, br, "AC2") == (260, 200)
+    assert pin(c, reg, "IN") == (400, 160) and pin(c, reg, "GND") == (450, 190)
+    wire(c, pin(c, ac, "1"), pin(c, t, "P1"))
+    wire(c, pin(c, ac, "2"), pin(c, t, "P2"))
+    wire(c, pin(c, t, "S1"), pin(c, br, "AC1"))
+    wire(c, pin(c, t, "S2"), (160, 220), (260, 220), pin(c, br, "AC2"))
+    wire(c, pin(c, br, "+"), (340, 160), pin(c, c1, "+"))
+    wire(c, (340, 160), pin(c, reg, "IN"))
+    wire(c, pin(c, reg, "OUT"), pin(c, r, "1"))
+    wire(c, pin(c, r, "2"), (640, 160), pin(c, led, "A"))
+    wire(c, (640, 160), (720, 160), pin(c, vm, "+"))
+    for p_ in (pin(c, br, "-"), pin(c, c1, "-"), pin(c, reg, "GND"), pin(c, led, "K"), pin(c, vm, "-")):
+        wire(c, p_, (p_[0], 300))
+    wire(c, (220, 300), (720, 300))
+    c.add("ground", 220, 300)
+    c.add("scope_probe", 320, 160, props={"channel": "A"})
+    c.add("scope_probe", 520, 160, props={"channel": "B"})
+    c.add("note", 360, 40, props={"text": "Mains (simulated!) → the transformer steps it down → the bridge rectifies it →\n"
+                                           "C1 smooths it → the 7805 gives a steady 5 V. The graph shows A and B."})
+    return c
+
+
+def rgb_mixer():
+    c = Circuit()
+    c.title = "RGB colour mixer"
+    b = c.add("battery", 0, 150, rot=1, props={"voltage": 9})                  # + (0,120) - (0,180)
+    led = c.add("led_rgb", 400, 260)                                            # R (370,240) G (370,260) B (370,280) K (430,260)
+    sws = []
+    for x, ya, colour in ((100, 240, "R"), (170, 260, "G"), (240, 280, "B")):
+        sw = c.add("switch", x, 70, rot=1, props={"closed": colour != "B"})    # (x,40)-(x,100)
+        r = c.add("resistor", x, 160, rot=1, props={"resistance": 470})       # (x,130)-(x,190)
+        wire(c, pin(c, sw, "1"), (x, 0))
+        wire(c, pin(c, sw, "2"), pin(c, r, "1"))
+        wire(c, pin(c, r, "2"), (x, ya), pin(c, led, colour))
+        sws.append(sw)
+    wire(c, pin(c, b, "+"), (0, 0), (240, 0))
+    wire(c, pin(c, led, "K"), (430, 340))
+    wire(c, pin(c, b, "-"), (0, 340), (430, 340))
+    c.add("ground", 0, 340)
+    for sw, ref in zip(sws, ("S1", "S2", "S3")):
+        sw.ref = ref
+    c.add("note", 620, 140, props={"text": "Click S1 (red), S2 (green) and S3 (blue) while it runs\n"
+                                            "to mix colours: red + green = yellow, all three = white."})
+    return c
+
+
+def counter_4026():
+    c = Circuit()
+    c.title = "Counter (555 + 4026)"
+    b = c.add("battery", 0, 200, rot=1, props={"voltage": 9})                 # + (0,170) - (0,230)
+    ic = timer_555(c, R1=10e3, R2=68e3, C=4.7e-6)                              # OUT (360,200)
+    cnt = c.add("ic4026", 520, 200)                                            # CLK (460,170) INH (460,190) RST (460,210)
+    disp = c.add("sevenseg", 700, 200)
+    wire(c, pin(c, b, "+"), (0, 60), (320, 60))
+    wire(c, pin(c, ic, "OUT"), (420, 200), (420, 170), pin(c, cnt, "CLK"))
+    wire(c, pin(c, cnt, "INH"), (440, 190), (440, 360))
+    wire(c, pin(c, cnt, "RST"), (450, 210), (450, 360))
+    for s_ in "abcdefg":
+        wire(c, pin(c, cnt, s_), pin(c, disp, s_))
+    wire(c, pin(c, disp, "COM"), (700, 360))
+    wire(c, pin(c, b, "-"), (0, 360), (700, 360))
+    c.add("ground", 0, 360)
+    c.add("note", 560, 60, props={"text": "The 555 makes clock pulses; the 4026 counts them\n"
+                                           "and drives the display directly — no decoder needed."})
+    return c
+
+
+def motor_reversing():
+    c = Circuit()
+    c.title = "Reversing a motor (DPDT)"
+    b = c.add("battery", 0, 100, rot=1, props={"voltage": 6})                  # + (0,70) - (0,130)
+    sw = c.add("dpdt", 150, 100)              # com1 (120,80) a1 (180,70) b1 (180,90) com2 (120,120) a2 (180,110) b2 (180,130)
+    m = c.add("motor", 400, 100, rot=1, props={"voltage": 6})                  # 1 (400,70) 2 (400,130)
+    assert pin(c, sw, "b2") == (180, 130) and pin(c, m, "1") == (400, 70)
+    wire(c, pin(c, b, "+"), (0, 40), (100, 40), (100, 80), pin(c, sw, "com1"))
+    wire(c, pin(c, b, "-"), (0, 160), (100, 160), (100, 120), pin(c, sw, "com2"))
+    wire(c, pin(c, sw, "a1"), pin(c, m, "1"))
+    wire(c, pin(c, sw, "b2"), (240, 130), (240, 30), (400, 30), pin(c, m, "1"))
+    wire(c, pin(c, sw, "b1"), (300, 90), (300, 130), pin(c, m, "2"))
+    wire(c, pin(c, sw, "a2"), (320, 110), (320, 150), (400, 150), pin(c, m, "2"))
+    c.add("ground", 0, 160)
+    c.add("note", 200, 210, props={"text": "Click S1 while it runs: the switch swaps the motor's\n"
+                                            "connections over, so it spins the other way."})
+    return c
+
+
+def l293d_motor():
+    """An L293D drives a motor forwards or backwards from two logic inputs; a 7805 makes its 5 V logic supply."""
+    c = Circuit()
+    c.title = "Motor driver (L293D)"
+    b = c.add("battery", 0, 200, rot=1, props={"voltage": 9})                  # + (0,170) - (0,230)
+    reg = c.add("reg_fixed", 150, 60, props={"model": "7805"})                 # IN (100,60) GND (150,90) OUT (200,60)
+    ic = c.add("l293d", 400, 220)
+    s1 = c.add("switch", 290, 130, rot=1)                                      # (290,100)-(290,160)
+    s2 = c.add("switch", 250, 130, rot=1)                                      # (250,100)-(250,160)
+    m = c.add("motor", 540, 200, rot=1, props={"voltage": 6})                  # 1 (540,170) 2 (540,230)
+    assert pin(c, ic, "EN12") == (340, 180) and pin(c, ic, "VCC2") == (420, 140) and pin(c, ic, "GND") == (400, 290)
+    assert pin(c, s1, "1") == (290, 100) and pin(c, m, "1") == (540, 170)
+    wire(c, pin(c, b, "+"), (0, 0), (420, 0), pin(c, ic, "VCC2"))
+    wire(c, (100, 0), pin(c, reg, "IN"))
+    wire(c, pin(c, reg, "OUT"), (380, 60), pin(c, ic, "VCC1"))
+    wire(c, pin(c, ic, "EN12"), (320, 180), (320, 60))
+    wire(c, pin(c, s1, "1"), (290, 60))
+    wire(c, pin(c, s2, "1"), (250, 60))
+    wire(c, pin(c, s1, "2"), (290, 190), pin(c, ic, "1A"))
+    wire(c, pin(c, s2, "2"), (250, 200), pin(c, ic, "2A"))
+    wire(c, pin(c, ic, "1Y"), (500, 190), (500, 140), (540, 140), pin(c, m, "1"))
+    wire(c, pin(c, ic, "2Y"), (480, 200), (480, 260), (540, 260), pin(c, m, "2"))
+    wire(c, pin(c, ic, "EN34"), (330, 230), (330, 330))
+    wire(c, pin(c, ic, "GND"), (400, 330))
+    wire(c, pin(c, reg, "GND"), (150, 330))
+    wire(c, pin(c, b, "-"), (0, 330), (400, 330))
+    c.add("ground", 0, 330)
+    s1.ref, s2.ref = "S1", "S2"
+    c.add("note", 260, 400, props={"text": "Close S1 and the motor turns one way; close S2 instead and it turns the other way.\n"
+                                            "Both or neither: it stops. The 7805 makes the 5 V the chip's logic needs."})
+    return c
+
+
+def relay_reversing():
+    """A DPDT relay swaps a motor's connections over when its coil is switched on."""
+    c = Circuit()
+    c.title = "Relay reversing a motor (DPDT)"
+    b = c.add("battery", 0, 150, rot=1, props={"voltage": 9})                  # + (0,120) - (0,180)
+    s1 = c.add("switch", 100, 50, rot=1)                                       # (100,20)-(100,80)
+    rl = c.add("relay_dpdt", 200, 150, props={"voltage": 9})
+    d = c.add("diode", 130, 150, rot=3, props={"model": "1N4001"})
+    m = c.add("motor", 460, 150, rot=1, props={"voltage": 9})                  # 1 (460,120) 2 (460,180)
+    assert pin(c, rl, "C1") == (160, 120) and pin(c, rl, "COM1") == (200, 130) and pin(c, rl, "NO2") == (240, 180)
+    assert pin(c, d, "K")[1] < pin(c, d, "A")[1], (pin(c, d, "K"), pin(c, d, "A"))
+    dk, da = pin(c, d, "K"), pin(c, d, "A")
+    wire(c, pin(c, b, "+"), (0, 0), (380, 0))
+    wire(c, pin(c, s1, "1"), (100, 0))
+    wire(c, pin(c, s1, "2"), (100, 90), (160, 90), pin(c, rl, "C1"))
+    wire(c, dk, (dk[0], 90))
+    wire(c, da, (da[0], 300))
+    wire(c, pin(c, rl, "C2"), (160, 300))
+    wire(c, pin(c, rl, "NO2"), (380, 180), (380, 0))
+    wire(c, pin(c, rl, "NC1"), (380, 120))
+    wire(c, pin(c, rl, "NO1"), (320, 140), (320, 300))
+    wire(c, pin(c, rl, "NC2"), (320, 160))
+    wire(c, pin(c, rl, "COM1"), (200, 60), (460, 60), pin(c, m, "1"))
+    wire(c, pin(c, rl, "COM2"), (200, 240), (460, 240), pin(c, m, "2"))
+    wire(c, pin(c, b, "-"), (0, 300), (320, 300))
+    c.add("ground", 0, 300)
+    s1.ref = "S1"
+    c.add("note", 240, 370, props={"text": "Click S1 while it runs: the relay clicks over and both of its switches swap\n"
+                                            "the motor's connections, so it spins the other way. D1 catches the coil's spike."})
+    return c
+
+
+NEW_14 = (thyristor_alarm, power_supply_5v, rgb_mixer, counter_4026, motor_reversing, l293d_motor, relay_reversing)
+
+
+def stepper_motor():
+    """A crystal clock steps a 4017 through Q0–Q3; each one turns on one L293D output in turn — A+, B+, A−, B−
+    — so the stepper turns one step per clock pulse."""
+    c = Circuit()
+    c.title = "Stepper motor (crystal clock + L293D)"
+    b = c.add("battery", 0, 250, rot=1, props={"voltage": 6})                  # + (0,220) - (0,280)
+    clk = c.add("xtal_clock", 100, 200, props={"frequency": 4})               # OUT (140,200)
+    cnt = c.add("counter4017", 260, 220)                                      # CLK (200,200) RST (200,220) Q0 (320,170) …
+    ic = c.add("l293d", 560, 240)                                             # EN12 (500,200) 1A (500,210) …
+    m = c.add("stepper", 780, 240, props={"voltage": 6})                      # A1 (740,230) A2 (740,250) B1 (820,230) B2 (820,250)
+    assert pin(c, cnt, "CLK") == (200, 200) and pin(c, ic, "1A") == (500, 210) and pin(c, m, "A1") == (740, 230)
+    wire(c, pin(c, clk, "OUT"), pin(c, cnt, "CLK"))
+    # Q4 resets it, so it counts 0, 1, 2, 3, 0 …
+    wire(c, pin(c, cnt, "Q4"), (330, 210), (330, 320), (185, 320), (185, 220), pin(c, cnt, "RST"))
+    # Q0–Q3 to 1A, 2A, 3A, 4A
+    for q, a, lane in (("Q0", "1A", 440), ("Q1", "2A", 450), ("Q2", "3A", 460), ("Q3", "4A", 470)):
+        pq, pa = pin(c, cnt, q), pin(c, ic, a)
+        wire(c, pq, (lane, pq[1]), (lane, pa[1]), pa)
+    # outputs: 1Y → A1, 2Y → B1, 3Y → A2, 4Y → B2 (so the sequence is A+, B+, A−, B−)
+    wire(c, pin(c, ic, "1Y"), (690, 210), (690, 230), pin(c, m, "A1"))
+    wire(c, pin(c, ic, "3Y"), (690, 260), (690, 250), pin(c, m, "A2"))
+    wire(c, pin(c, ic, "2Y"), (660, 220), (660, 160), (850, 160), (850, 230), pin(c, m, "B1"))
+    wire(c, pin(c, ic, "4Y"), (660, 270), (660, 320), (850, 320), (850, 250), pin(c, m, "B2"))
+    # supplies: everything from the 6 V battery
+    wire(c, pin(c, b, "+"), (0, 40), (580, 40), pin(c, ic, "VCC2"))
+    wire(c, (540, 40), pin(c, ic, "VCC1"))
+    wire(c, pin(c, ic, "EN12"), (485, 200), (485, 40))
+    wire(c, pin(c, ic, "EN34"), (490, 250), (490, 200))
+    wire(c, pin(c, ic, "GND"), (560, 420))
+    wire(c, pin(c, b, "-"), (0, 420), (560, 420))
+    c.add("ground", 0, 420)
+    c.add("note", 420, 480, props={"text": "The crystal clock ticks 4 times a second; the 4017 turns on Q0, Q1, Q2, Q3 in turn,\n"
+                                            "and the L293D energises the coils A, B, then A and B reversed — one step each tick."})
+    return c
+
+
+def keypad_demo():
+    """Which key? Pressing a key joins its row to its column: current flows from +9 V through that column's LED,
+    the key, and that row's LED to 0 V — so the two LEDs light."""
+    c = Circuit()
+    c.title = "Keypad (which key is pressed)"
+    kp = c.add("keypad", 80, 200)                                    # pins along the bottom, y = 270
+    # right-most pin first: it turns along highest and goes to the left-most LED, so no wires cross
+    pins = sorted(((pin(c, kp, n), n) for n, _x, _y in kp.part.pins), key=lambda t: -t[0][0])
+    colours = {"R1": "Red", "R2": "Orange", "R3": "Yellow", "R4": "Green", "C1": "Blue", "C2": "Blue", "C3": "Blue"}
+    rows_x, cols_x = [], []
+    for k, ((px, py), name) in enumerate(pins):
+        y = py + 20 + 10 * k
+        led_x = 220 + 90 * k
+        if name.startswith("R"):                     # row: pin → LED (anode at the bottom) → 0 V at the top
+            led = c.add("led", led_x, 150, rot=3, props={"colour": colours[name]})   # A (x,180) K (x,120)
+            wire(c, (px, py), (px, y), (led_x, y), pin(c, led, "A"))
+            wire(c, pin(c, led, "K"), (led_x, 90))
+            rows_x.append(led_x)
+        else:                                        # column: +9 V → resistor → LED → pin
+            led = c.add("led", led_x, 150, rot=1, props={"colour": colours[name]})   # A (x,120) K (x,180)
+            r = c.add("resistor", led_x, 60, rot=1, props={"resistance": 470})       # (x,30) (x,90)
+            wire(c, (px, py), (px, y), (led_x, y), pin(c, led, "K"))
+            wire(c, pin(c, r, "2"), pin(c, led, "A"))
+            wire(c, pin(c, r, "1"), (led_x, 0))
+            cols_x.append(led_x)
+    wire(c, (min(rows_x), 90), (max(rows_x), 90))
+    wire(c, (max(rows_x), 90), (max(rows_x) + 40, 90))
+    c.add("ground", max(rows_x) + 40, 90)
+    wire(c, (min(cols_x), 0), (max(cols_x), 0))
+    wire(c, (min(cols_x) - 40, 0), (min(cols_x), 0))
+    c.add("rail_pos", min(cols_x) - 40, 0, props={"voltage": 9})
+    c.add("note", 450, 420, props={"text": "Hold down a key while it runs: the LED for its column (blue)\n"
+                                            "and the LED for its row (green, yellow, orange, red) light up."})
+    return c
+
+
+def jk_counter():
+    """Two JK flip-flops with J = K = 1 toggle on each clock: a 2-bit binary counter."""
+    c = Circuit()
+    c.title = "Binary counter (JK flip-flops)"
+    clk = c.add("xtal_clock", 0, 100, props={"frequency": 2})                   # OUT (40,100)
+    f1 = c.add("jkff", 160, 100)                       # J (110,80) CLK (110,100) K (110,120) S (160,40) R (160,160) Q (210,80) Qn (210,120)
+    f2 = c.add("jkff", 520, 100)                       # J (470,80) CLK (470,100) K (470,120) S (520,40) R (520,160) Q (570,80) Qn (570,120)
+    assert pin(c, f1, "Qn") == (210, 120) and pin(c, f2, "CLK") == (470, 100)
+    wire(c, pin(c, clk, "OUT"), pin(c, f1, "CLK"))
+    # Q̅ of the first clocks the second (so together they count up)
+    wire(c, pin(c, f1, "Qn"), (225, 120), (225, 200), (445, 200), (445, 100), pin(c, f2, "CLK"))
+    leds = []
+    for f in (f1, f2):
+        jx, jy = pin(c, f, "J")
+        kx, ky = pin(c, f, "K")
+        wire(c, (jx, jy), (jx - 10, jy), (jx - 10, 50))                         # J = 1
+        c.add("rail_pos", jx - 10, 50, props={"voltage": 9})
+        wire(c, (kx, ky), (kx - 10, ky), (kx - 10, 150))                         # K = 1
+        c.add("rail_pos", kx - 10, 150, rot=2, props={"voltage": 9})
+        sx, sy = pin(c, f, "S")
+        wire(c, (sx, sy), (sx, 20))                                              # S and R not used: held at 0 V
+        c.add("ground", sx, 20, rot=2)
+        rx, ry = pin(c, f, "R")
+        wire(c, (rx, ry), (rx, 180))
+        c.add("ground", rx, 180)
+        qx, qy = pin(c, f, "Q")                                                  # Q → LED → resistor → 0 V
+        led = c.add("led", qx + 50, qy, props={"colour": "Red"})                 # A (qx+20) K (qx+80)
+        r = c.add("resistor", qx + 140, qy, props={"resistance": 470})           # (qx+110) (qx+170)
+        wire(c, (qx, qy), pin(c, led, "A"))
+        wire(c, pin(c, led, "K"), pin(c, r, "1"))
+        wire(c, pin(c, r, "2"), (qx + 190, qy))
+        c.add("ground", qx + 190, qy)
+        leds.append(led)
+    leds[0].ref, leds[1].ref = "LED1", "LED2"
+    c.add("note", 380, 280, props={"text": "Each flip-flop has J = K = 1, so it toggles on every clock pulse — dividing by 2.\n"
+                                            "LED2 and LED1 count in binary: 00, 01, 10, 11, 00 … (the clock ticks twice a second)."})
+    return c
+
+
+def schmitt_flasher():
+    """A 4093 Schmitt NAND with a resistor and capacitor: an oscillator that S1 turns on and off."""
+    c = Circuit()
+    c.title = "Schmitt NAND flasher (4093)"
+    sw = c.add("switch", 60, 80, rot=1)                                          # (60,50) (60,110)
+    g = c.add("schmitt_nand", 200, 150)                                          # A (160,140) B (160,160) Y (240,150)
+    r = c.add("resistor", 200, 230, props={"resistance": 100e3})                 # (170,230) (230,230)
+    cap = c.add("electrolytic", 120, 260, rot=1, props={"capacitance": 4.7e-6})  # + (120,240) - (120,280)
+    rl = c.add("resistor", 320, 60, rot=1, props={"resistance": 1000})           # (320,30) (320,90)  (a 4093 can only sink a few mA)
+    led = c.add("led", 320, 120, rot=1, props={"colour": "Green"})               # A (320,90) K (320,150)
+    assert pin(c, g, "A") == (160, 140) and pin(c, cap, "+") == (120, 240)
+    wire(c, pin(c, sw, "1"), (60, 0))
+    wire(c, pin(c, sw, "2"), (60, 140), pin(c, g, "A"))
+    wire(c, pin(c, g, "B"), (140, 160), (140, 230), pin(c, r, "1"))
+    wire(c, (140, 230), (120, 230), pin(c, cap, "+"))
+    wire(c, pin(c, g, "Y"), (260, 150), (260, 230), pin(c, r, "2"))
+    wire(c, (260, 150), pin(c, led, "K"))               # the LED lights when the output goes low
+    wire(c, pin(c, rl, "1"), (320, 0))
+    wire(c, pin(c, cap, "-"), (120, 320))
+    wire(c, (100, 0), (320, 0))
+    c.add("ground", 120, 320)
+    wire(c, (60, 0), (100, 0))
+    c.add("rail_pos", 100, 0, props={"voltage": 9})
+    c.add("note", 220, 390, props={"text": "Close S1: the gate charges and discharges C1 through R1, flashing the LED\n"
+                                            "about once a second (a bigger R1 or C1 makes it slower). Open S1 to stop it."})
+    return c
+
+
+def rotary_demo():
+    c = Circuit()
+    c.title = "Rotary switch (pick an LED)"
+    sw = c.add("rotary", 80, 120)                                                # COM (50,120) 1 (110,90) 2 (110,110) 3 (110,130) 4 (110,150)
+    assert pin(c, sw, "COM") == (50, 120)
+    wire(c, pin(c, sw, "COM"), (30, 120), (30, 0))
+    c.add("rail_pos", 30, 0, props={"voltage": 9})
+    for k, colour in enumerate(("Red", "Yellow", "Green", "Blue")):
+        x = 200 + 70 * k
+        r = c.add("resistor", x, 230, rot=1, props={"resistance": 470})          # (x,200) (x,260)
+        led = c.add("led", x, 310, rot=1, props={"colour": colour})              # A (x,280) K (x,340)
+        p_ = pin(c, sw, str(k + 1))
+        wire(c, p_, (p_[0] + 10 + 10 * (3 - k), p_[1]), (p_[0] + 10 + 10 * (3 - k), 180 - 10 * k), (x, 180 - 10 * k),
+             pin(c, r, "1"))
+        wire(c, pin(c, r, "2"), pin(c, led, "A"))
+        wire(c, pin(c, led, "K"), (x, 380))
+    wire(c, (200, 380), (410, 380))
+    c.add("ground", 200, 380)
+    c.add("note", 300, 60, props={"text": "Click the rotary switch while it runs to turn it to the next position."})
+    return c
+
+
+def pwm_dimmer():
+    """A 555 makes a fast on/off signal; the knob changes how long it's on each time (the duty cycle). The LED
+    and bulb flick on and off over a hundred times a second, too fast to see, so they just look dimmer."""
+    c = Circuit()
+    c.title = "PWM dimmer (555)"
+    b = c.add("battery", 0, 210, rot=1, props={"voltage": 9})                     # + (0,180) - (0,240)
+    ic = c.add("timer555", 300, 200)                                             # DIS (240,180) THR (240,200) TRIG (240,220)
+    r1 = c.add("resistor", 180, 90, rot=1, props={"resistance": 1000})           # (180,60) (180,120)
+    vr = c.add("potentiometer", 100, 210, props={"resistance": 100e3, "setting": 25})  # 1 (70,210) 2 (130,210) W (100,180)
+    d1 = c.add("diode", 70, 260, rot=1, props={"model": "1N4148"})               # A (70,230) K (70,290)
+    d2 = c.add("diode", 130, 260, rot=3, props={"model": "1N4148"})              # A (130,290) K (130,230)
+    ct = c.add("capacitor", 200, 310, rot=1, props={"capacitance": 100e-9})     # (200,290) (200,330)
+    cc = c.add("capacitor", 320, 300, rot=1, props={"capacitance": 10e-9})      # (320,280) (320,320)
+    r3 = c.add("resistor", 400, 250, rot=1, props={"resistance": 470})           # (400,220) (400,280)
+    led = c.add("led", 400, 330, rot=1, props={"colour": "Red"})                 # A (400,300) K (400,360)
+    q = c.add("nmos", 500, 200, props={"model": "2N7000"})                       # G (470,200) D (510,170) S (510,230)
+    lamp = c.add("lamp", 510, 110, rot=1, props={"voltage": 9, "power": 0.5})   # (510,80) (510,140)
+    P = lambda part, n: pin(c, part, n)
+    assert P(ic, "DIS") == (240, 180) and P(vr, "wiper") == (100, 180) and P(d2, "A") == (130, 290)
+    assert P(q, "D") == (510, 170) and P(led, "K") == (400, 360) and P(d1, "K") == (70, 290)
+    # +9 V along the top, 0 V along the bottom
+    wire(c, P(b, "+"), (0, 40), (180, 40))
+    wire(c, (180, 40), (280, 40))
+    wire(c, (280, 40), (320, 40))
+    wire(c, (320, 40), (510, 40), P(lamp, "1"))
+    wire(c, P(b, "-"), (0, 380), (200, 380))
+    wire(c, (200, 380), (280, 380))
+    wire(c, (280, 380), (320, 380))
+    wire(c, (320, 380), (400, 380))
+    wire(c, (400, 380), (510, 380))
+    c.add("ground", 0, 380)
+    wire(c, P(ic, "VCC"), (320, 40))
+    wire(c, P(ic, "RESET"), (280, 40))
+    wire(c, P(r1, "1"), (180, 40))
+    wire(c, P(r1, "2"), (180, 180))
+    wire(c, P(ic, "DIS"), (180, 180))
+    wire(c, P(vr, "wiper"), (180, 180))
+    # charging goes through one side of the knob and D1, discharging through the other side and D2
+    wire(c, P(vr, "1"), P(d1, "A"))
+    wire(c, P(vr, "2"), P(d2, "K"))
+    wire(c, P(d1, "K"), P(d2, "A"))
+    wire(c, P(d2, "A"), P(ct, "1"))
+    wire(c, P(ct, "1"), (240, 290), P(ic, "TRIG"))
+    wire(c, P(ic, "TRIG"), P(ic, "THR"))
+    wire(c, P(ct, "2"), (200, 380))
+    wire(c, P(ic, "GND"), (280, 380))
+    wire(c, P(ic, "CTRL"), P(cc, "1"))
+    wire(c, P(cc, "2"), (320, 380))
+    # the output drives the LED and, through the MOSFET, the bulb
+    wire(c, P(ic, "OUT"), (400, 200), P(r3, "1"))
+    wire(c, (400, 200), P(q, "G"))
+    wire(c, P(r3, "2"), P(led, "A"))
+    wire(c, P(led, "K"), (400, 380))
+    wire(c, P(q, "S"), (510, 380))
+    wire(c, P(q, "D"), P(lamp, "2"))
+    c.add("note", 260, 450, props={"text": "Turn the knob (VR1) while it runs: the LED and bulb get brighter or dimmer.\n"
+                                            "The 555 switches them fully on and off about 140 times a second — too fast\n"
+                                            "to see, so they just look dimmer. Slow the simulation right down to watch it."})
+    return c
+
+
+NEW_15 = (stepper_motor, keypad_demo, jk_counter, schmitt_flasher, rotary_demo)
+NEW_151 = (pwm_dimmer,)
+
+def main(only=None):
     os.makedirs(OUT, exist_ok=True)
     for fn in (led_and_resistor, voltage_divider, night_light, two_way_switch, capacitor_charging,
                buzzer_and_motor, flasher_555, led_chaser, opamp_light_sensor, logic_gates, mosfet_motor,
                rc_filter_graph, binary_display, relay_lamp, motor_load, doorbell_555, burglar_alarm,
-               rain_alarm, buck_converter, optoisolator):
+               rain_alarm, buck_converter, optoisolator, tl431_reference,
+               shift_register_595) + NEW_14 + NEW_15 + NEW_151:
+        if only and fn not in only:
+            continue
         c = fn()
         path = os.path.join(OUT, c.title + ".wirely")
         c.save(path)

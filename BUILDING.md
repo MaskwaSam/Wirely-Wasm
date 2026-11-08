@@ -1,7 +1,7 @@
 # Building Wirely
 
 This is for people who want to run Wirely from its source code, change it, or make the installers themselves.
-To just **use** Wirely, download it from the [latest release](https://github.com/richiewillmott/Wirely/releases/latest)
+To just **use** Wirely, download it from the [latest release](https://github.com/wirely-app/wirely-app.github.io/releases/latest)
 instead — see the [README](README.md).
 
 ## Run from source
@@ -28,6 +28,31 @@ scratch, delete the `.venv` folder. Or manage it yourself: `pip install -r requi
 To release: bump `__version__` in `wirely/__init__.py` (and `pyproject.toml`), push, then on GitHub
 **Releases → Draft a new release**, tag it (e.g. `v1.0.1`) and **Publish**. The downloads appear on the release
 about 15 minutes later.
+
+## The browser version (Wirely Web)
+
+The web version is in `web/`. It runs the desktop app's own Python code — `wirely/model`, `wirely/sim` and the
+sheet and drawing code from `wirely/ui` — in the browser with [Pyodide](https://pyodide.org). There's no Qt in
+a browser, so `web/py/qtshim.py` stands in for the parts of Qt that code uses: its QPainter writes down what it
+was asked to draw, and `web/app.js` replays that on an HTML canvas. `web/py/wirely_web.py` is the glue between
+the page and Python, and `web/py/fallback/numpy` is a small pure-Python stand-in for numpy, used only if the
+real numpy can't be downloaded.
+
+**On GitHub** (`.github/workflows/web.yml`): every push builds it and tests it in a real browser (Chromium);
+pushes to the main branch then publish it to GitHub Pages, at `https://wirely-app.github.io/ (a project named <owner>.github.io is served at the root)`.
+One-time setup: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+
+**Yourself:**
+
+```
+python tools/build_web.py                      # builds _site/ (Pyodide then loads from the jsDelivr CDN)
+cd _site && python -m http.server 8000         # then open http://localhost:8000
+```
+
+To include Pyodide itself (so nothing loads from a CDN, as the GitHub build does):
+`npm pack pyodide@314.0.7`, unpack it, and pass `--pyodide <that>/package` (plus `--numpy <wheel>` for numpy).
+`python tools/web_smoke.py _site` tests the built site in headless Chromium (`pip install playwright` and
+`playwright install chromium` first). `tests/test_web.py` tests the web glue in ordinary Python.
 
 ## Make a Windows program yourself
 

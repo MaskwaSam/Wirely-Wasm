@@ -26,7 +26,7 @@ def label_lines(comp: Component) -> list[str]:
     for p in comp.part.props:
         if p.on_label:
             v = comp.value(p.key)
-            vals.append(fmt(v, p.unit) if p.kind == "number" else str(v))
+            vals.append(fmt(v, p.unit) if p.kind == "number" else P.choice_text(v) if p.kind == "choice" else str(v))
     if vals:
         lines.append(" ".join(vals))
     return lines
@@ -45,6 +45,30 @@ def _font(bold=False):
     return f
 
 
+def _r(v, k=2):
+    return round(float(v), k)
+
+
+def live_look_key(live, kind, anim_t):
+    """The parts of a part's live readings that change how it looks: while it's running, a part is only drawn again
+    when this changes (otherwise its ready-drawn picture is reused). The browser version uses it the same way."""
+    if not live:
+        return None
+    k = (live.get("blown"), bool(live.get("warn")), live.get("reading"))
+    for name in sorted(n for n in live if n.startswith("_")):
+        val = live[name]
+        if isinstance(val, (list, tuple)):
+            val = tuple(_r(x) if isinstance(x, (int, float)) else x for x in val)
+        elif isinstance(val, float):
+            val = _r(val)
+        k += ((name, val),)
+    if kind == "motor":
+        k += (round(live.get("angle", 0.0) / 3),)
+    if kind == "buzzer" and live.get("level", 0) > 0:
+        k += (_r(live["level"]), round((anim_t * 6) % 1.0, 1))
+    return k
+
+
 class ComponentItem(QGraphicsItem):
     """One part on the sheet. Its position is the part's centre; rotation is applied when drawing."""
 
@@ -58,6 +82,10 @@ class ComponentItem(QGraphicsItem):
         self.setZValue(10 if ghost else 1)
         if ghost:
             self.setOpacity(0.55)
+        else:
+            # keep a ready-drawn picture: redrawn only when the part changes (see CircuitScene.refresh_look)
+            self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
+        self.look = None
         self.sync()
 
     # ---- geometry
@@ -99,11 +127,32 @@ class ComponentItem(QGraphicsItem):
         w = max([fm_b.horizontalAdvance(lines[0])] + [fm.horizontalAdvance(t) for t in lines[1:]])
         h = len(lines) * (LABEL_PX + 2)
         b = self._body
-        if b.width() >= b.height():          # lying flat: label above
+        pins = [QPointF(*self._pin_local(n)) for n in self.comp.pin_positions()]
+        right = any(pt.x() > b.right() + 1 for pt in pins)
+        above = any(pt.y() < b.top() - 1 for pt in pins)
+        below = any(pt.y() > b.bottom() + 1 for pt in pins)
+        if b.width() >= b.height() or (right and not above):   # lying flat, or pins on the right: label above
+            side = "above"
+        elif right and not below:                              # pins on the right and above: label below
+            side = "below"
+        else:                                                  # standing up: label on the right
+            side = "right"
+        # … unless pins come out of that side (a chip turned round, a regulator upside down): use a clear one,
+        # or the outside top-right corner, where pins never are
+        clear = {"above": not above, "below": not below, "right": not right}
+        if not clear[side]:
+            side = next((s_ for s_ in ("above", "below", "right") if clear[s_]), "corner")
+        if side == "above":
             r = QRectF(b.center().x() - w / 2, b.top() - h - 3, w, h)
             align = Qt.AlignHCenter
-        else:                                # standing up: label on the right
+        elif side == "below":
+            r = QRectF(b.center().x() - w / 2, b.bottom() + 3, w, h)
+            align = Qt.AlignHCenter
+        elif side == "right":
             r = QRectF(b.right() + 5, b.center().y() - h / 2, w, h)
+            align = Qt.AlignLeft
+        else:
+            r = QRectF(b.right() + 2, b.top() - h - 2, w, h)
             align = Qt.AlignLeft
         return r, lines, align
 
@@ -161,22 +210,27 @@ class ComponentItem(QGraphicsItem):
         g = live.get("_glow", 0.0)
         if g <= 0.02 or live.get("blown"):
             return
-        if self.comp.kind == "led":
+        led = "_rgb" in live or self.comp.kind == "led"
+        if "_rgb" in live:                  # bi-colour and RGB LEDs: the colours they're mixing
+            col = QColor(live["_rgb"])
+        elif self.comp.kind == "led":
             col = QColor(S.LED_RGB.get(self.comp.value("colour"), "#ff3b30"))
-            radius = 16 + 14 * g
         else:
             col = QColor(255, 205, 40)
-            radius = 18 + 18 * g
+        radius = (22 + 22 * g) if led else (18 + 18 * g)
         c = QPointF(0, 0)       # the LED / lamp itself sits at the part's centre (its box also covers the arrows)
         grad = QRadialGradient(c, radius)
+        core = QColor(col).lighter(160) if led else QColor(col)      # a bright, almost white centre
+        core.setAlphaF(min(1.0, 0.95 * g + 0.05) if led else 0.75 * g)
         inner = QColor(col)
-        inner.setAlphaF(0.75 * g)
+        inner.setAlphaF(min(1.0, 0.85 * g) if led else 0.75 * g)
         mid = QColor(col)
-        mid.setAlphaF(0.28 * g)
+        mid.setAlphaF(0.4 * g if led else 0.28 * g)
         outer = QColor(col)
         outer.setAlphaF(0.0)
-        grad.setColorAt(0.0, inner)
-        grad.setColorAt(0.45, mid)
+        grad.setColorAt(0.0, core)
+        grad.setColorAt(0.18 if led else 0.0, inner)
+        grad.setColorAt(0.5 if led else 0.45, mid)
         grad.setColorAt(1.0, outer)
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(grad))
@@ -261,6 +315,8 @@ class WireItem(QGraphicsItem):
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         self.setZValue(0)
+        self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
+        self.look = None
         self.sync()
 
     def sync(self):

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import math
 
+from ..i18n import tr
+
 VT = 0.025852          # thermal voltage at 300 K
 GMIN = 1e-12           # tiny conductance across every junction (as SPICE)
 R_ON, R_OFF = 0.01, 1e12      # an open switch leaks only a few picoamps
@@ -25,7 +27,8 @@ DIODES = {  # Is, n, Rs, max current (A)
     "1N5408": (1.4e-8, 1.9, 0.02, 3.0),
     "1N5819": (7.7e-7, 1.1, 0.05, 1.0),       # Schottky: about 0.4 V drop
 }
-LED_VF = {"Red": 1.95, "Orange": 2.0, "Yellow": 2.05, "Green": 2.15, "Blue": 3.1, "White": 3.1}
+LED_VF = {"Red": 1.95, "Orange": 2.0, "Yellow": 2.05, "Green": 2.15, "Blue": 3.1, "White": 3.1,
+          "True green": 3.1}       # the InGaN green in RGB LEDs (about the same as blue)
 LED_N, LED_RS = 2.0, 4.0
 BJTS = {  # polarity, Is, BF, BR, max Ic (A), max power (W)
     "BC548": (1, 1.8e-14, 290.0, 7.5, 0.1, 0.5),
@@ -140,6 +143,8 @@ class Device:
     n_internal = 0
     nonlinear = False
     reactive = False
+    stores_energy = False    # V×I is energy going into / out of storage, not heat: never derive power from it
+    main_pins = None         # (first, second) pin indices whose voltage and current the readout shows; None = pins 0, 1
 
     def __init__(self, comp, nodes):
         self.comp = comp
@@ -172,6 +177,55 @@ class Device:
     def reading(self):
         """Text shown on meters during the simulation, or None."""
         return None
+
+    # ---- light that people see (LEDs, bulbs, displays)
+    GAMMA = 0.6          # how bright light looks: the eye isn't linear, half the light looks more than half as bright
+
+    def light_now(self):
+        """Light given out right now, 0..1 for each lit thing in the part (a list), or None if it gives none."""
+        return None
+
+    def see(self, h):
+        """Add one time step of light to what the eye has collected since the screen was last drawn."""
+        now = self.light_now()
+        e = self.__dict__.get("_eye")
+        if e is None or len(e[0]) != len(now):
+            e = self._eye = [[0.0] * len(now), 0.0, None]
+        sums = e[0]
+        for k, v in enumerate(now):
+            sums[k] += v * h
+        e[1] += h
+
+    # how much simulated time the eye averages over: about 1/15 s at real-time speed. The app sets it from the
+    # speed you choose (slow motion: a shorter stretch, so you see the flicker), not from how fast the computer
+    # actually keeps up — so a busy circuit running slower than real time still looks right.
+    eye_window = 0.066
+
+    def take_light(self):
+        """How bright it looks: like an eye, averaged over the last moment, so a part switched on and off quickly
+        (PWM, a multiplexed display) looks steadily dimmer instead of flickering."""
+        now = self.light_now() or []
+        e = self.__dict__.get("_eye")
+        if e is not None and e[1] > 0:
+            hist = self.__dict__.setdefault("_eye_hist", [])
+            if hist and len(hist[0][0]) != len(e[0]):
+                hist.clear()
+            hist.append((e[0], e[1]))
+            total = sum(t for _s, t in hist)
+            while len(hist) > 1 and total - hist[0][1] >= self.eye_window:
+                total -= hist.pop(0)[1]
+            # the oldest frame counts only as far as it lies inside the window (all of it if it's the only one)
+            w0 = 1.0 if len(hist) == 1 else min(1.0, (self.eye_window - (total - hist[0][1])) / hist[0][1])
+            span = total - hist[0][1] * (1.0 - w0)
+            vals = [(w0 * hist[0][0][k] + sum(sums[k] for sums, _t in hist[1:])) / span for k in range(len(e[0]))]
+            self._eye = [[0.0] * len(vals), 0.0, vals]
+        elif e is not None and e[2] is not None:     # paused: nothing new to see
+            vals = e[2]
+        else:
+            vals = now
+        if self.blown:
+            return [0.0] * len(vals)
+        return [float(max(0.0, min(1.0, v))) ** self.GAMMA for v in vals]
 
     def _overload(self, bad: bool, h: float, limit_s: float, instant: bool = False) -> bool:
         """True when a part has been overloaded long enough to fail."""
@@ -226,8 +280,9 @@ class Resistor(Resistive):
         self.warn = "hot" if self.heat > self.rating else None
         if self.heat > 2 * self.rating or self.power > 1000 * self.rating:
             self.blown = True
-            self.event = (f"{self.comp.ref} burnt out — {self.power:.2f} W is far more than its "
-                          f"{self.rating:g} W rating.")
+            self.event = tr("{ref} burnt out — {power:.2f} W is far more than its "
+                            "{rating:g} W rating.",
+                            ref=self.comp.ref, power=self.power, rating=self.rating)
 
 
 class VarResistor(Resistive):
@@ -281,7 +336,8 @@ class Fuse(Resistive):
         i = abs(self.i_pins[0])
         if not self.blown and self._overload(i > self.rating, ctx.h, 0.02, i > 3 * self.rating):
             self.blown = True
-            self.event = f"{self.comp.ref} blew — {i:.2f} A is more than its {self.rating:g} A rating."
+            self.event = tr("{ref} blew — {i:.2f} A is more than its {rating:g} A rating.",
+                            ref=self.comp.ref, i=i, rating=self.rating)
 
 
 class Switch(Resistive):
@@ -372,12 +428,14 @@ class Source(Device):
         self.warn = "short" if short else None
         if short and not getattr(self, "_short_told", False):
             self._short_told = True
-            self.event = (f"{self.comp.ref} is short-circuited — current is flowing straight from + to − "
-                          f"({abs(i_out):.1f} A).")
+            self.event = tr("{ref} is short-circuited — current is flowing straight from + to − "
+                            "({i_out:.1f} A).",
+                            ref=self.comp.ref, i_out=abs(i_out))
 
 
 class Capacitor(Device):
     reactive = True
+    stores_energy = True     # an ideal capacitor dissipates nothing: V×I just charges or discharges it
 
     def update_params(self):
         self.C = float(self.prop("capacitance"))
@@ -415,12 +473,54 @@ class Capacitor(Device):
         self.v_prev, self.i_prev = vd, i
         self.i_pins = [i, -i]
         self.vd = vd
+        self.power = 0.0
         if self.vmax is not None and not self.blown:
             bad = vd < -1.0 or vd > 1.2 * self.vmax
             if self._overload(bad, ctx.h, 0.1):
                 self.blown = True
-                why = "it's connected the wrong way round" if vd < 0 else f"{vd:.1f} V is over its rating"
-                self.event = f"{self.comp.ref} popped — {why}."
+                why = tr("it's connected the wrong way round") if vd < 0 else tr("{vd:.1f} V is over its rating", vd=vd)
+                self.event = tr("{ref} popped — {why}.", ref=self.comp.ref, why=why)
+
+
+class RsDiode:
+    """A junction with a series resistance, worked out on the spot (no inside node): for the voltage across it,
+    find how it splits between the junction and the resistance, then stamp the combined current and slope.
+    With the resistance in series the current only rises in a straight line at high voltage, so Newton needs no
+    limiting. Used for the many diodes in a driver chip, where inside nodes would make every step slower."""
+
+    def __init__(self, a, k, Is=14.11e-9, n=1.984, Rs=0.5):
+        self.a, self.k, self.Is, self.nvt, self.Rs = a, k, Is, n * VT, Rs
+        self.current = self.power = 0.0
+
+    def _solve(self, vd):
+        Is, nvt, Rs = self.Is, self.nvt, self.Rs
+        if vd < 0.3:                    # hardly any current: the resistance makes no difference
+            vj = vd
+        else:
+            vj = min(vd, nvt * math.log(vd / (Rs * Is) + 1.0))      # start above the answer
+            for _ in range(60):
+                e = math.exp(vj / nvt)
+                f = vj + Rs * Is * (e - 1.0) - vd
+                df = 1.0 + Rs * Is * e / nvt
+                dv = f / df
+                vj -= dv
+                if abs(dv) < 1e-12:
+                    break
+        e = math.exp(min(vj / nvt, 700.0))
+        i = Is * (e - 1.0)
+        gj = Is * e / nvt
+        return i + GMIN * vd, gj / (1.0 + gj * Rs) + GMIN
+
+    def stamp(self, S, x):
+        vd = v(x, self.a) - v(x, self.k)
+        i, g = self._solve(vd)
+        S.g(self.a, self.k, g)
+        S.i(self.a, self.k, i - g * vd)
+
+    def accept(self, x):
+        vd = v(x, self.a) - v(x, self.k)
+        self.current = self._solve(vd)[0]
+        self.power = self.current * vd
 
 
 class Diode(Device):
@@ -500,23 +600,38 @@ class Diode(Device):
         self.warn = "over" if over else None
         # real diodes ride out short surges: 3× their rating for a millisecond, about 30× for an instant
         self._surge = self._surge + ctx.h if abs(i) > 3 * self.imax else 0.0
-        if self._overload(over, ctx.h, 0.03, abs(i) > 30 * self.imax or self._surge > 1e-3):
+        if self._overload(over, ctx.h, 0.03, abs(i) > 30 * self.imax or
+                          self._surge > getattr(self, "surge_time", 1e-3)):
             self.blown = True
-            what = "LED" if self.comp.kind == "led" else "diode"
-            hint = " Add a resistor in series to limit the current." if self.comp.kind == "led" else ""
-            self.event = (f"{self.comp.ref} popped! {abs(i) * 1000:.0f} mA is too much for this {what} "
-                          f"(max {self.imax * 1000:.0f} mA).{hint}")
+            if self.comp.kind == "led":
+                self.event = tr("{ref} popped! {i:.0f} mA is too much for this LED (max {imax:.0f} mA). "
+                                "Add a resistor in series to limit the current.",
+                                ref=self.comp.ref, i=abs(i) * 1000, imax=self.imax * 1000)
+            else:
+                self.event = tr("{ref} popped! {i:.0f} mA is too much for this diode (max {imax:.0f} mA).",
+                                ref=self.comp.ref, i=abs(i) * 1000, imax=self.imax * 1000)
+
+    def light_now(self):
+        if self.comp is None or self.comp.kind != "led":
+            return None
+        if self.blown:
+            return [0.0]
+        # LEDs give no visible light below about 0.1 mA, and look fully lit from about 15 mA
+        return [max(0.0, min(1.0, (getattr(self, "current", 0.0) - 1e-4) / 0.015))]
 
     def glow(self):
         if self.blown or self.comp.kind != "led":
             return 0.0
-        # LEDs give no visible light below about 0.1 mA, and look fully lit from about 15 mA
-        return max(0.0, min(1.0, (self.current - 1e-4) / 0.015)) ** 0.6
+        return self.light_now()[0] ** self.GAMMA
+
+    def take_glow(self):
+        return self.take_light()[0] if self.comp.kind == "led" else 0.0
 
 
 class BJT(Device):
     """Ebers–Moll transistor. Pins B, C, E. PNP handled by flipping all polarities."""
     nonlinear = True
+    main_pins = (1, 2)       # readout: V(C−E) and the collector current
 
     def update_params(self):
         pol, Is, bf, br, icmax, pmax = BJTS.get(self.prop("model"), BJTS["BC548"])
@@ -599,14 +714,17 @@ class BJT(Device):
         self.warn = "over" if (abs(self.ic) > self.icmax or self.power > self.pmax) else None
         if self._overload(bad, ctx.h, 0.2, abs(self.ic) > 5 * self.icmax):
             self.blown = True
-            self.event = (f"{self.comp.ref} burnt out — {abs(self.ic) * 1000:.0f} mA / {self.power:.2f} W is "
-                          f"too much for a {self.prop('model')} (max {self.icmax * 1000:.0f} mA). "
-                          "Add a resistor to its base or load.")
+            self.event = tr("{ref} burnt out — {ic:.0f} mA / {power:.2f} W is "
+                            "too much for a {model} (max {icmax:.0f} mA). "
+                            "Add a resistor to its base or load.",
+                            ref=self.comp.ref, ic=abs(self.ic) * 1000, power=self.power, model=self.prop('model'),
+                            icmax=self.icmax * 1000)
 
 
 def spike_message(ref, volts, vmax):
-    return (f"{ref} was destroyed by a {volts:.0f} V spike — more than its {vmax:.0f} V limit. If it switches a "
-            "relay coil, motor or inductor, put a diode across the coil (pointing towards +) to catch the spike.")
+    return tr("{ref} was destroyed by a {volts:.0f} V spike — more than its {vmax:.0f} V limit. If it switches a "
+              "relay coil, motor or inductor, put a diode across the coil (pointing towards +) to catch the spike.",
+              ref=ref, volts=volts, vmax=vmax)
 
 
 class Lamp(Device):
@@ -697,7 +815,8 @@ class Lamp(Device):
         rad = self.radiated()
         if self._overload(rad > 1.6, h, 0.2, rad > 4.0):
             self.blown = True
-            self.event = f"{self.comp.ref} blew — its filament can't take {rad * self.Prated:.1f} W."
+            self.event = tr("{ref} blew — its filament can't take {watts:.1f} W.",
+                            ref=self.comp.ref, watts=rad * self.Prated)
 
     def after_dc(self):
         pass
@@ -707,8 +826,17 @@ class Lamp(Device):
         lamp on half power looks much dimmer than half, and goes dark quickly as it cools."""
         if self.blown:
             return 0.0
-        f = (self.theta ** 10 - 0.003) / 0.997
-        return max(0.0, min(1.0, f)) ** 0.5
+        return self.light_now()[0] ** self.GAMMA
+
+    GAMMA = 0.5
+
+    def light_now(self):
+        if self.blown:
+            return [0.0]
+        return [max(0.0, min(1.0, (self.theta ** 10 - 0.003) / 0.997))]
+
+    def take_glow(self):
+        return self.take_light()[0]
 
 
 class Buzzer(Resistive):
@@ -773,6 +901,8 @@ class Motor(Device):
             self.i_pins = [self.current, -self.current]
             self.power = 0.0
             return
+        # the current this step's solution was found with (the back-EMF of the speed before this step)
+        i = (vd - self.k * self.w) / self.R
         # rotor: J dω/dt = k·i − b·ω − load, with i = (v − kω)/R (solved implicitly: always stable)
         drive = self.k * vd / self.R
         if abs(self.w) < 1e-3 and abs(drive) <= self.TL:
@@ -781,7 +911,6 @@ class Motor(Device):
             sgn = 1.0 if (self.w if abs(self.w) > 1e-3 else drive) > 0 else -1.0
             self.w = (self.w + h / self.J * (drive - self.TL * sgn)) / \
                 (1 + h * (self.b + self.k * self.k / self.R) / self.J)
-        i = (vd - self.k * self.w) / self.R
         self.current = i
         self.vd = vd
         self.i_pins = [i, -i]
@@ -793,8 +922,9 @@ class Motor(Device):
         # too much voltage: it spins far too fast and the brushes and windings overheat
         if self._overload(abs(vd) > 2.0 * self.V, h, 1.0, abs(vd) > 6.0 * self.V and self._over > 0.05):
             self.blown = True
-            self.event = (f"{self.comp.ref} burnt out — {abs(vd):.0f} V is far too much for a {self.V:g} V motor: "
-                          "it spun much too fast and overheated.")
+            self.event = tr("{ref} burnt out — {vd:.0f} V is far too much for a {V:g} V motor: "
+                            "it spun much too fast and overheated.",
+                            ref=self.comp.ref, vd=abs(vd), V=self.V)
 
 
 class Voltmeter(Resistive):
